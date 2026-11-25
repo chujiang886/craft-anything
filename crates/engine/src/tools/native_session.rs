@@ -11,7 +11,7 @@
 
 use crate::tool::{Ctx, Effects, Requires, ToolOutput, ToolSpec, Toolset, parse_params, schema_of};
 use craft_anything_evidence::{Confidence, Coverage, ErrorCode, EvidenceBuilder, Subject, ToolError};
-use craft_anything_platform::process::{Process, RunningProcess};
+use craft_anything_platform::process::{Launch, Launched};
 use craft_anything_platform::sync::Mutex;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -33,7 +33,7 @@ struct Sessions(Mutex<HashMap<String, Session>>);
 struct Session {
     program: PathBuf,
     pid: u32,
-    running: RunningProcess,
+    running: Launched,
     started: Instant,
 }
 
@@ -131,17 +131,12 @@ fn begin(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, ToolError> {
             .with_remediation("Close one with native_program_session_end, or list them with native_program_session_show."));
     }
     let dir = p.working_directory.clone().unwrap_or_else(|| p.program.parent().map(PathBuf::from).unwrap_or_default());
-    let cancel = ctx.cancel.clone();
     ctx.report(None, format!("Starting {}…", p.program.display()));
-    let running = Process::new(&p.program)
-        .args(&p.args)
-        .cwd(&dir)
-        .timeout(START_TIMEOUT + Duration::from_secs(300))
-        .stdout_cap(64 * 1024)
-        .stderr_cap(64 * 1024)
-        .cancel_when(move || cancel.is_cancelled())
-        .label("the program")
-        .spawn()?;
+    // The program is a window that is watched afterwards, so it must outlive the tool call that
+    // started it. A [`Process`] is supervised and killed when its caller exits, which would take
+    // the window with it; a [`Launch`] is fire-and-forget by design: nothing is captured and
+    // nothing is killed, and the child is reaped when it ends.
+    let running = Launch::new(&p.program).args(&p.args).cwd(&dir).label("the program").start_watched()?;
     let pid = running.pid();
     let id = format!("program-{pid}");
     let started = Instant::now();
@@ -174,7 +169,7 @@ fn show(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, ToolError> {
                 "program": s.program.display().to_string(),
                 "pid": s.pid,
                 "running_for_ms": s.started.elapsed().as_millis() as u64,
-                "finished": s.running.is_finished(),
+                "finished": !s.running.is_running(),
             })
         })
         .collect();
@@ -199,8 +194,8 @@ fn end(ctx: &mut Ctx<'_>, params: Value) -> Result<ToolOutput, ToolError> {
     let mut closed = Vec::new();
     for id in wanted {
         let Some(mut session) = open.remove(&id) else { continue };
-        // The program is asked to stop, then killed with its process group if it does not.
-        session.running.kill_and_wait(Duration::from_secs(10));
+        // The program is asked to stop, then killed if it does not.
+        session.running.stop();
         closed.push(json!({"session_id": id, "program": session.program.display().to_string(), "pid": session.pid}));
     }
     drop(open);
