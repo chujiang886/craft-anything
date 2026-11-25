@@ -199,6 +199,7 @@ impl Check for WebBehaviourCheck {
 pub const PROBE_TEXT: &str = "craft-anything";
 
 /// A control the page shows, that a session can act on.
+#[derive(Debug, Clone)]
 pub struct Control {
     pub role: String,
     pub name: String,
@@ -210,12 +211,22 @@ pub struct Control {
     pub selector: Option<String>,
     /// The value a choice is given: one of the options it offers, so the choice really takes.
     pub option: Option<String>,
+    /// Every option the control offers, in order.
+    ///
+    /// A choice whose options change when another control is pressed *depends* on it. That is
+    /// how a country decides which regions are offered, and it is invisible to a method that
+    /// only looks for controls that appeared.
+    pub offers: Vec<String>,
+    /// The option the control already has.
+    ///
+    /// Choosing it again is not a change: the page is already in that state.
+    pub selected: Option<String>,
 }
 
 impl Control {
     /// A control with a role and a name, found by its role and name.
     pub fn of(role: &str, name: &str, step_id: &str) -> Control {
-        Control { role: role.into(), name: name.into(), step_id: step_id.into(), selector: None, option: None }
+        Control { role: role.into(), name: name.into(), step_id: step_id.into(), selector: None, option: None, offers: Vec::new(), selected: None }
     }
 
     /// Whether the control takes text: a field, a box or a combo.
@@ -249,6 +260,17 @@ impl Control {
         action
     }
 
+    /// The action that chooses this control by one of the options it offers *now*.
+    ///
+    /// A choice whose options changed is chosen by one of the new ones: the old value is not
+    /// offered any more, and choosing it would do nothing.
+    pub fn choose_offered_action(&self) -> Option<Value> {
+        let value = self.offers.first()?.clone();
+        let mut action = json!({"kind": "select", "value": value, "step_id": self.step_id});
+        self.locate(&mut action);
+        Some(action)
+    }
+
     /// The action that fills this control with the probe text.
     pub fn fill_action(&self) -> Value {
         let mut action = json!({"kind": "fill", "value": PROBE_TEXT, "step_id": self.step_id});
@@ -280,6 +302,25 @@ impl Control {
     pub fn value(&self) -> String {
         self.option.clone().unwrap_or_else(|| PROBE_TEXT.to_string())
     }
+
+    /// Every option this control offers, in order.
+    ///
+    /// All of them are tried, including the one the control already has: a page may hide what
+    /// it shows until the choice is made, so the default can be the option that matters. A
+    /// control with no options in the markup is pressed once, as it is.
+    pub fn choices(&self) -> Vec<String> {
+        if self.offers.is_empty() {
+            return vec![self.value()];
+        }
+        self.offers.clone()
+    }
+
+    /// The action that chooses this control by a given option.
+    pub fn choose_action(&self, value: &str) -> Value {
+        let mut action = json!({"kind": "select", "value": value, "step_id": self.step_id});
+        self.locate(&mut action);
+        action
+    }
 }
 
 /// The controls a page's accessibility tree shows, in the order they appear.
@@ -301,6 +342,8 @@ pub fn controls_of_page(result: &Value, dom: &Value) -> Vec<Control> {
     let markup = markup_says(dom);
     let mut seen = std::collections::BTreeSet::new();
     let mut out = Vec::new();
+    // How many controls of each role have been taken from the markup already.
+    let mut taken: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
     for node in nodes.iter() {
         let role = node.get("role").and_then(Value::as_str).unwrap_or("");
         if !ACTABLE.contains(&role) {
@@ -319,22 +362,32 @@ pub fn controls_of_page(result: &Value, dom: &Value) -> Vec<Control> {
         }
         // The markup says how to find the control; the tree says what it is called. The
         // selector is the surer way to find it, so it is used when there is one.
-        let selector = markup.selectors.get(role).cloned();
+        //
+        // The tree and the markup list the controls in the same order, so the *n*-th control of
+        // a role in the tree is the *n*-th of that role in the markup. A page with two choices
+        // is told apart this way: pairing them by role alone would give both the first one's
+        // selector.
+        let index = taken.entry(role.to_string()).or_insert(0);
+        let element = markup.elements.get(role).and_then(|list| list.get(*index)).cloned();
+        *index += 1;
+        let selector = element.as_ref().filter(|e| !e.selector.is_empty()).map(|e| e.selector.clone());
         let step_id = format!("probe-{}", out.len() + 1);
-        let option = selector.as_ref().and_then(|sel| markup.option_values.get(sel)).cloned();
-        out.push(Control { role: role.to_string(), name: name.to_string(), step_id, selector, option });
+        let option = element.as_ref().and_then(|e| e.option.clone());
+        let offers = element.as_ref().map(|e| e.offers.clone()).unwrap_or_default();
+        let selected = element.and_then(|e| e.selected);
+        out.push(Control { role: role.to_string(), name: name.to_string(), step_id, selector, option, offers, selected });
     }
-    // A choice with no markup is given one of the options the tree names.
-    if out.iter().any(|c| (c.role == "combobox" || c.role == "listbox") && c.option.is_none()) {
-        let options: Vec<String> = nodes
-            .iter()
-            .filter(|n| n.get("role").and_then(Value::as_str) == Some("option"))
-            .filter_map(|n| n.get("name").and_then(Value::as_str))
-            .map(str::to_string)
-            .collect();
-        if let Some(choice) = out.iter_mut().find(|c| c.role == "combobox" || c.role == "listbox") {
-            choice.option = options.first().cloned();
-        }
+    // A choice with no markup is given one of the options the tree names. Only a choice that
+    // has no value of its own is given one: a choice the markup was read for already knows its
+    // value, and giving it another would choose the wrong option.
+    let options: Vec<String> = nodes
+        .iter()
+        .filter(|n| n.get("role").and_then(Value::as_str) == Some("option"))
+        .filter_map(|n| n.get("name").and_then(Value::as_str))
+        .map(str::to_string)
+        .collect();
+    if let Some(choice) = out.iter_mut().find(|c| (c.role == "combobox" || c.role == "listbox") && c.option.is_none()) {
+        choice.option = options.first().cloned();
     }
     out
 }
@@ -366,16 +419,22 @@ fn markup_says(dom: &Value) -> Markup {
                 continue;
             }
             let selector = format!("#{id}");
-            out.selectors.entry((*role).to_string()).or_insert_with(|| selector.clone());
+            // A page may hold several controls of the same kind — two choices, say — so each
+            // one is kept, in the order the page lists them. The accessibility tree lists them
+            // in the same order, so the two can be paired.
+            let mut element = MarkupElement { selector: selector.clone(), option: None, offers: Vec::new(), selected: None };
             // A choice takes the value of one of its options, not the label.
             if *role == "combobox" {
                 let after = &tail[end + 1..];
                 let Some(close) = after.find("</select>") else { continue };
                 let options = &after[..close];
-                if let Some(value) = first_option_value(options) {
-                    out.option_values.insert(selector.clone(), value);
-                }
+                element.option = first_option_value(options);
+                element.offers = all_option_values(options);
+                // The option the choice already has: the one marked `selected`, or the first,
+                // which is what a browser picks when none is marked.
+                element.selected = selected_option(options).or_else(|| element.offers.first().cloned());
             }
+            out.elements.entry((*role).to_string()).or_default().push(element);
         }
     }
     out
@@ -384,10 +443,23 @@ fn markup_says(dom: &Value) -> Markup {
 /// What a page's markup says about its controls.
 #[derive(Debug, Clone, Default)]
 struct Markup {
-    /// The selector that finds a control, by the role it shows.
-    selectors: std::collections::BTreeMap<String, String>,
-    /// The value a choice takes, by its selector.
-    option_values: std::collections::BTreeMap<String, String>,
+    /// The controls the markup holds, by the role they show, in the order the page lists them.
+    elements: std::collections::BTreeMap<String, Vec<MarkupElement>>,
+}
+
+/// One control in a page's markup.
+#[derive(Debug, Clone, Default)]
+struct MarkupElement {
+    /// How to find it again.
+    selector: String,
+    /// The value a choice takes.
+    option: Option<String>,
+    /// Every option a choice offers, in order.
+    ///
+    /// The options of a select are what another control can change, so they are kept whole.
+    offers: Vec<String>,
+    /// The option the choice already has.
+    selected: Option<String>,
 }
 
 /// An attribute's value, from a tag's opening text.
@@ -404,6 +476,36 @@ fn first_option_value(options: &str) -> Option<String> {
     let tail = &options[at..];
     let end = tail.find('>')?;
     attribute(&tail[..end], "value")
+}
+
+/// The value of the option a select has marked as its own.
+fn selected_option(options: &str) -> Option<String> {
+    let mut rest = options;
+    while let Some(at) = rest.find("<option") {
+        let tail = &rest[at..];
+        rest = &tail[1..];
+        let Some(end) = tail.find('>') else { break };
+        let element = &tail[..end];
+        if element.contains("selected") {
+            return attribute(element, "value");
+        }
+    }
+    None
+}
+
+/// Every option's value in a select's markup, in the order they are offered.
+fn all_option_values(options: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = options;
+    while let Some(at) = rest.find("<option") {
+        let tail = &rest[at..];
+        rest = &tail[1..];
+        let Some(end) = tail.find('>') else { break };
+        if let Some(value) = attribute(&tail[..end], "value") {
+            out.push(value);
+        }
+    }
+    out
 }
 
 /// Record the original's session: drive its page through the controls it shows, and keep what
@@ -544,20 +646,52 @@ pub fn groups_of(
     // page with a hundred choices must not make the study take a hundred sessions.
     for control in controls.iter().filter(|c| c.reveals()).take(MAX_REVEALING_PROBES) {
         // Press it on its own and see what the page shows.
-        let action = control.reveal_action();
-        let shown = match read_after(call, url, &action) {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        let revealed = controls_of_page(&shown, &Value::Null);
-        let added: Vec<&Control> = revealed.iter().filter(|c| !controls.iter().any(|k| k.role == c.role && k.name == c.name)).collect();
-        if added.is_empty() {
-            continue;
+        //
+        // A choice offers several options and only some of them change the page, so each option
+        // is tried in turn and the one that changed something is kept. Choosing the first
+        // option every time would pick the page's default every time, and a dependency would
+        // never show: a country's first option is the one that is already chosen.
+        let mut best: Option<(Value, Vec<Control>, Vec<Control>)> = None;
+        for value in control.choices() {
+            let action = control.choose_action(&value);
+            let Ok(shown) = read_after(call, url, &action) else { continue };
+            let dom = shown.pointer("/final_artifacts/dom").cloned().unwrap_or(Value::Null);
+            let revealed = controls_of_page(&shown, &dom);
+            // What changed by pressing it: controls that appeared, and controls whose *options*
+            // changed. A choice that decides which options another choice offers is a
+            // dependency that no list of appeared controls would show.
+            let appeared: Vec<Control> = revealed.iter().filter(|c| !controls.iter().any(|k| k.role == c.role && k.name == c.name)).cloned().collect();
+            let changed: Vec<Control> = revealed
+                .iter()
+                .filter(|c| !c.offers.is_empty())
+                .filter(|c| controls.iter().find(|k| k.role == c.role && k.name == c.name).is_some_and(|before| before.offers != c.offers))
+                .cloned()
+                .collect();
+            if appeared.is_empty() && changed.is_empty() {
+                continue;
+            }
+            // The option that changed the most is kept. A page's default may hide what it
+            // shows until the choice is made, and another option may show less, so the one
+            // that revealed the most is the one the page is understood by.
+            let more = appeared.len() + changed.len();
+            let best_more = best.as_ref().map(|(_, ap, ch)| ap.len() + ch.len()).unwrap_or(0);
+            if more >= best_more {
+                best = Some((action, appeared, changed));
+            }
         }
-        // The group is the control that revealed them, then the fields it revealed.
+        let Some((action, appeared, changed)) = best else { continue };
+        // The group is the control that revealed them, then what it revealed.
         let mut group = vec![action];
-        for field in added.iter().filter(|c| c.takes_text()) {
+        for field in appeared.iter().filter(|c| c.takes_text()) {
             group.push(field.fill_action());
+        }
+        // A choice whose options changed is chosen too: which option it offers is part of how
+        // the page behaves, and the build has to make the same offer. It is chosen by one of the
+        // options it offers *now*, because the old value is not offered any more.
+        for choice in changed.iter() {
+            if let Some(action) = choice.choose_offered_action() {
+                group.push(action);
+            }
         }
         groups.push(group);
         if groups.len() >= MAX_GROUPS {
@@ -619,7 +753,9 @@ fn read_after(call: &dyn Fn(&str, Value) -> Result<craft_anything_engine::tool::
         "web_walkthrough_record",
         json!({
             "actions": actions,
-            "capture": {"at_end": ["accessibility"]},
+            // The markup as well as the tree: what a choice *offers* is in the markup, and a
+            // choice whose options changed is a dependency.
+            "capture": {"at_end": ["accessibility", "dom"]},
             "headless": true,
             "timeout_secs": 60,
         }),
@@ -627,5 +763,8 @@ fn read_after(call: &dyn Fn(&str, Value) -> Result<craft_anything_engine::tool::
     let result = out.to_json().get("result").cloned().unwrap_or(Value::Null);
     // The page as it was after the action: the run's final tree, which is the page as the last
     // action left it. It is handed back in the shape the controls are read from.
-    Ok(json!({"final_artifacts": {"accessibility": result.pointer("/final_artifacts/accessibility").cloned().unwrap_or(Value::Null)}}))
+    Ok(json!({"final_artifacts": {
+        "accessibility": result.pointer("/final_artifacts/accessibility").cloned().unwrap_or(Value::Null),
+        "dom": result.pointer("/final_artifacts/dom").cloned().unwrap_or(Value::Null),
+    }}))
 }

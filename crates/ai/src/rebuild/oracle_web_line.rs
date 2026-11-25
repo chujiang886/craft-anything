@@ -217,3 +217,60 @@ fn the_probes_a_session_tries_are_bounded() {
     assert!(super::oracle_web::MAX_REVEALING_PROBES > 0);
     assert!(super::oracle_web::MAX_REVEALING_PROBES <= super::oracle_web::MAX_GROUPS * 2, "the two bounds agree");
 }
+
+/// A control knows what it offers, so a choice that changes another choice's offer is visible.
+///
+/// The accessibility tree says what a control is called; the markup says what it offers. Both
+/// are needed: a country decides which regions are offered, and only the markup says which.
+#[test]
+fn a_control_knows_what_it_offers() {
+    let dom = json!({
+        "text": "<html><body><select id=\"country\"><option value=\"us\">United States</option><option value=\"de\">Germany</option></select><select id=\"regions\"></select></body></html>"
+    });
+    let controls = super::oracle_web::controls_of_page(
+        &json!({"final_artifacts": {"accessibility": {"nodes": [
+            {"role": "combobox", "name": "Country"},
+            {"role": "combobox", "name": "Region"}
+        ]}}}),
+        &dom,
+    );
+    let country = controls.iter().find(|c| c.name == "Country").expect("the country");
+    assert_eq!(country.offers, ["us", "de"], "the country offers two countries");
+    assert_eq!(country.option.as_deref(), Some("us"), "and takes the value of one of them");
+    // Two controls of the same kind are told apart: each is found by its own id.
+    let region = controls.iter().find(|c| c.name == "Region").expect("the region");
+    assert_eq!(region.selector.as_deref(), Some("#regions"), "the region is found by its own id");
+    assert!(region.offers.is_empty(), "the region offers nothing yet");
+}
+
+/// The markup's elements are paired with the tree's controls by order, so a page with two
+/// choices of the same kind gives each its own selector.
+#[test]
+fn two_choices_of_the_same_kind_are_told_apart() {
+    let dom = json!({
+        "text": "<html><body><select id=\"a\"><option value=\"1\">One</option></select><select id=\"b\"><option value=\"2\">Two</option></select></body></html>"
+    });
+    let controls = super::oracle_web::controls_of_page(
+        &json!({"final_artifacts": {"accessibility": {"nodes": [
+            {"role": "combobox", "name": "First"},
+            {"role": "combobox", "name": "Second"}
+        ]}}}),
+        &dom,
+    );
+    let first = controls.iter().find(|c| c.name == "First").expect("the first");
+    let second = controls.iter().find(|c| c.name == "Second").expect("the second");
+    assert_eq!(first.selector.as_deref(), Some("#a"));
+    assert_eq!(second.selector.as_deref(), Some("#b"));
+    assert_eq!(first.offers, ["1"]);
+    assert_eq!(second.offers, ["2"]);
+}
+
+/// Every option of a choice is tried, including the one it already has: a page may hide what
+/// it shows until the choice is made.
+#[test]
+fn every_option_of_a_choice_is_tried() {
+    let mut choice = super::oracle_web::Control::of("combobox", "Method", "a");
+    choice.offers = vec!["card".into(), "cash".into()];
+    choice.selected = Some("card".into());
+    assert_eq!(choice.choices(), ["card", "cash"], "the default is tried too: it may be the one that shows the fields");
+}

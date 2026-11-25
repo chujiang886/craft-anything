@@ -211,9 +211,32 @@ tree says how deep each control is, and the tree lists a container's children to
 control at a different depth has entered a container of its own and starts a group. Within a
 group the fields are filled before the buttons are pressed.
 
-What this still does not find: a dependency between two controls that are not a field and a
-button (a choice that changes which *other* choices are offered, say). The groups are found by
-acting on each control once, not by searching over paths.
+#### A dependency between two choices
+
+A choice can decide what *another* choice offers: a country decides which regions are offered.
+The dependency is invisible to a method that looks for controls that **appeared**, because the
+region choice was on the page all along — only what it *offers* changed.
+
+So what is compared is not which controls appeared but **what each control offers, before and
+after**. A control whose options changed depends on the control that was pressed, and it is
+brought into that control's group.
+
+Two things make this work:
+
+- **The options come from the markup, not the accessibility tree.** The tree says what a control
+  is called; the markup says what it offers. A page whose inline script mentions option labels
+  puts those labels into the tree as if they were options, so the tree is not to be trusted
+  here.
+- **Every option is tried, not just the first.** A choice offers several options and only some
+  of them change the page. The option that changed the most is kept: a page's default may hide
+  what it shows until the choice is made, so the default can be the option that matters.
+
+A page with two choices of the same kind gives each its own selector by pairing the tree's
+controls with the markup's elements **in order**, the order both list them in.
+
+What this still does not find: a dependency between two controls whose effect is not in what they
+offer and not in what appears — a choice that changes a field's *value*, say. The groups are
+found by acting on each control once, not by searching over paths.
 
 #### The session is bounded
 

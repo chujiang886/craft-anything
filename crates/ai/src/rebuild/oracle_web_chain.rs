@@ -168,3 +168,91 @@ fn a_choice_that_shows_fields_brings_them_into_the_session() {
     let fill_at = group_kinds.iter().position(|k| k == "fill").expect("a fill");
     assert!(select_at < fill_at, "the choice is chosen before the fields it showed are filled: {group_kinds:?}");
 }
+
+/// A page whose country choice decides which regions are offered.
+///
+/// The region choice is on the page from the start, so nothing *appears* when the country is
+/// chosen — only what the region *offers* changes. A method that looks for controls that
+/// appeared finds nothing here.
+const DEPENDENT: &str = r#"<!doctype html><html><head><script>
+function regions() {
+  var list = document.getElementById('regions');
+  list.innerHTML = '';
+  var opts = document.getElementById('country').value === 'de'
+    ? [['de-b', 'Berlin'], ['de-h', 'Hamburg']]
+    : [['us-n', 'New York'], ['us-c', 'Chicago']];
+  opts.forEach(function (o) {
+    var opt = document.createElement('option');
+    opt.value = o[0];
+    opt.textContent = o[1];
+    list.appendChild(opt);
+  });
+}
+</script></head><body>
+<h1>Shipping</h1>
+<label for="country">Country</label>
+<select id="country" onchange="regions()">
+  <option value="us">United States</option>
+  <option value="de">Germany</option>
+</select>
+<label for="regions">Region</label>
+<select id="regions"></select>
+<button onclick="document.getElementById('out').textContent='sent'">Send</button>
+<p id="out"></p>
+</body></html>"#;
+
+/// A choice that changes what another choice offers brings that other choice into the session.
+///
+/// The dependency is invisible to a method that looks for controls that appeared: the region
+/// choice was on the page all along. It shows only in what the region *offers*, so that is what
+/// is compared.
+#[ignore = "needs a browser and a served page"]
+#[test]
+fn a_choice_that_changes_what_another_offers_brings_it_into_the_session() {
+    let d = tempfile::tempdir().unwrap();
+    let original = d.path().join("original");
+    std::fs::create_dir_all(&original).unwrap();
+    std::fs::write(original.join("index.html"), DEPENDENT).unwrap();
+    let server = craft_anything_platform::serve::serve_dir(&original).expect("serve the original");
+    let url = server.url();
+
+    let mut session = craft_anything_engine::testing::session();
+    session.settings.deep_mode = true;
+    let engine = craft_anything_engine::Engine::new(session);
+    let call = |tool: &str, params: serde_json::Value| {
+        engine.call(
+            tool,
+            params,
+            craft_anything_engine::CallOptions::new(craft_anything_engine::Caller::Agent).with_consent(craft_anything_engine::Consent::Granted),
+        )
+    };
+
+    let opened = call(
+        "web_walkthrough_record",
+        serde_json::json!({
+            "actions": [{"kind": "goto", "url": url}],
+            "capture": {"at_end": ["accessibility", "dom"]},
+            "headless": true,
+            "timeout_secs": 60,
+        }),
+    )
+    .expect("open the page");
+    let first = opened.to_json().get("result").cloned().unwrap_or(serde_json::Value::Null);
+    let dom = first.pointer("/final_artifacts/dom").cloned().unwrap_or(serde_json::Value::Null);
+    let controls = super::oracle_web::controls_of_page(&first, &dom);
+
+    // The region choice is on the page to begin with, offering nothing.
+    let region = controls.iter().find(|c| c.name == "Region").expect("the region choice");
+    assert!(region.offers.is_empty(), "the region choice offers nothing yet: {:?}", region.offers);
+
+    let groups = super::oracle_web::groups_of(&controls, &call, &url).expect("group the session");
+    let kinds = |group: &Vec<Value>| -> Vec<String> { group.iter().filter_map(|a| a.get("kind")).filter_map(|k| k.as_str()).map(str::to_string).collect() };
+    let all: Vec<String> = groups.iter().flat_map(kinds).collect();
+
+    // Two choices are made: the country, and the region the country decided.
+    let selects: Vec<&Value> = groups.iter().flatten().filter(|a| a.get("kind").and_then(|k| k.as_str()) == Some("select")).collect();
+    assert_eq!(selects.len(), 2, "the country is chosen and the region it decided: {all:?}");
+    // The region is chosen by its value, and its value is one the country made possible.
+    let region_value = selects[1]["value"].as_str().unwrap_or_default();
+    assert!(region_value.starts_with("de-"), "the region is one Germany offers: {region_value}");
+}
