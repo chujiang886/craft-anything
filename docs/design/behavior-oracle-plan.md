@@ -372,7 +372,12 @@ Two things came with it:
 
    This was not only this project's problem: the plugin manager's GitHub connection check runs
    `git ls-remote` through that scrub, so on a machine whose parent environment carries that
-   configuration it failed outright and reported the connection as broken.
+   configuration it failed outright and reported the connection as broken. The same call was
+   verified to fail before the fix and to work after it.
+
+   The Harness does not accept external pull requests, so the fix is posted as a discussion with
+   the branch ready to apply:
+   https://github.com/deepseek-ai/deepseek-harness/discussions/14307
 
 ## The pull requests
 
