@@ -284,3 +284,19 @@ fn a_control_that_could_not_be_acted_on_is_a_gap() {
     let gap = "the original's Name could not be acted on";
     assert!(gap.contains("could not be acted on"), "{gap}");
 }
+
+/// A native session is bounded, so a window with many panels cannot make the study endless.
+#[test]
+fn a_native_session_is_bounded() {
+    // Many panels, each with its own field and button.
+    let mut nodes = Vec::new();
+    for i in 0..40 {
+        nodes.push(json!({"depth": 1, "role": "AXGroup", "title": format!("Panel{i}")}));
+        nodes.push(json!({"depth": 2, "role": "AXTextField", "title": format!("Name{i}")}));
+        nodes.push(json!({"depth": 2, "role": "AXButton", "title": format!("Save{i}")}));
+    }
+    let groups = super::oracle_native::groups_of(&json!({"nodes": nodes}));
+    assert!(groups.len() <= super::oracle_native::MAX_GROUPS, "the groups are bounded: {}", groups.len());
+    let actions: usize = groups.iter().map(|g| g.len()).sum();
+    assert!(actions <= super::oracle_native::MAX_SESSION_ACTIONS, "the session is bounded: {actions}");
+}

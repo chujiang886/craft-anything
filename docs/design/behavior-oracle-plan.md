@@ -291,29 +291,88 @@ checks say so plainly when it is missing.
 
 ### The real gaps
 
-1. **A dependency whose effect is neither what appears nor what is offered.** A choice that
-   changes a *field's value* — not which fields are shown, and not which options another choice
-   offers — is still not found. Comparing values is possible but prone to false positives (a
-   value may change for reasons that have nothing to do with the control being pressed), so it
-   was left out on purpose. It should be measured on real pages before it is built.
-2. **The native session has no budget.** The web session is bounded; the native one is not. It
-   opens no browser sessions, so the cost is far lower, but the bound is missing.
-3. **The groups are found by acting on each control once, not by searching over paths.** A
+1. **The groups are found by acting on each control once, not by searching over paths.** A
    dependency that only shows along a particular sequence of choices is not found.
+
+### What was measured, and then built
+
+The value dependency — a choice that changes *what a field holds*, rather than what appears or
+what another choice offers — was measured before it was built, because comparing values is prone
+to false positives.
+
+**The measurement.** Each control on a page was acted on alone, and the page read again; a
+control whose value changed, and which was not the control that was acted on, is a dependency.
+Measured on three real pages (a form with eleven fields, a to-do page, an encyclopedia) and on a
+page built for the purpose:
+
+| page | controls | value dependencies |
+|---|---|---|
+| a form with eleven fields | 11 | 0 |
+| a to-do page | 1 | 0 |
+| an encyclopedia | 2 | 0 |
+| a page with a plan that rewrites a name | 3 | **1** |
+
+**The false positive the measurement found.** On one page, two fields looked like dependencies —
+until the values were read: they were the page's own `value="John"` and `value="Doe"`, and the
+fields had changed because *the probe typed into them*. A dependency is another control changing,
+never the one that was acted on. Without that rule, the measurement reports the probe's own
+action as a dependency.
+
+**So it was built.** A field's value is now readable, and a control whose value changed is
+brought into the session — and the field is *read* rather than filled, because the choice decides
+what it holds and typing into it would not be the same behaviour.
+
+Two things came with it:
+
+- **The accessibility tree keeps the value now**, where before it kept only the role and the name.
+  The native helper already did this; the web one did not.
+- **A password field's value is never read.** Chrome reports a password field as an ordinary text
+  box with no mark in the tree to tell it apart, and reports its value as one bullet per
+  character — which is the password's *length*. The bullets are therefore never kept, and a read
+  of a password field is refused outright, by the element's own `type`.
+
+### The gaps that remain
+
+2. **The native session's budget** was added with the web one: sixteen groups and sixty actions.
+3. **A dependency whose effect is a control's *value* is found, but one whose effect is neither
+   that, nor what appears, nor what is offered** — a choice that changes a field's *value* in a
+   way the accessibility tree does not report, say — is still not found.
+4. **The groups are still found by acting on each control once**, not by searching over paths.
 
 ### The work around it
 
-4. **Windows' `setvalue` path is unverified.** The code is written (`ValuePattern::SetValue`),
+5. **Windows' `setvalue` path is unverified.** The code is written (`ValuePattern::SetValue`),
    but there is no Windows host to run it on.
-5. **The game's mechanics oracle has no live test.** Its numbers are compared against the
+6. **The game's mechanics oracle has no live test.** Its numbers are compared against the
    original's decompiled constants, which is verified by unit test; a game that runs is not.
+7. **The native live tests cannot run on this machine.** The accessibility tree reports
+   `AXApplication` for every element whose role it cannot determine — including a text field's
+   own element, and every window of every app, Finder included. The structure is right (a menu
+   bar and a scroll area come through with their own roles), but the roles and the values do not.
+   This was confirmed to be **not** this work: the pristine upstream helper, with none of these
+   changes, returns the same empty tree. It is a condition of macOS 27.0.1 on this machine, and
+   the native live checks are `#[ignore]`d, so the suite stays green.
+
+   Two real bugs were found while chasing it, and both are fixed:
+
+   - **A program started by the session tool died with the tool call.** The tool's process
+     supervised the program and killed the group when it exited, so the window was gone before
+     anyone could read it. The program is now launched fire-and-forget, the way a program that is
+     meant to outlive its launcher is.
+   - **The oracle read the window before it drew.** It now waits for the window, so a program
+     that takes a moment to draw is still read.
 
 ### Housekeeping
 
-6. **`GIT_CONFIG_*` environment variables.** A leftover credential-helper configuration (11
-   variables, `VALUE` without `KEY`) makes `git` fail with `missing config key
-   GIT_CONFIG_KEY_0`. It was worked around by unsetting them per command. Where they come from
-   is not yet known, and other tools on the machine may be affected.
+6. **`GIT_CONFIG_*` environment variables** — found and fixed. The Harness's shared subprocess
+   scrub drops any variable whose *name* looks like a credential, and `GIT_CONFIG_KEY_0` does.
+   The count and the values survived, so git was handed a count naming pairs that were not there
+   and refused every command with `missing config key GIT_CONFIG_KEY_0`. The count now goes with
+   the keys it counts.
+
+   This was not only this project's problem: the plugin manager's GitHub connection check runs
+   `git ls-remote` through that scrub, so on a machine whose parent environment carries that
+   configuration it failed outright and reported the connection as broken.
 
 ## The pull requests
 

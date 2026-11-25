@@ -178,8 +178,40 @@ fn start_program(cx: &OracleCx, program: &std::path::Path, args: &[String]) -> R
     let result = out.to_json().get("result").cloned().unwrap_or(Value::Null);
     let session_id = result.get("session_id").and_then(Value::as_str).ok_or_else(|| ToolError::internal("The program session has no id."))?.to_string();
     let pid = result.get("pid").and_then(Value::as_u64).ok_or_else(|| ToolError::internal("The program session has no process id."))? as u32;
-    Ok(Started { session_id, pid })
+    let started = Started { session_id, pid };
+    // The program is running, but its window may not be there yet: a program takes a moment to
+    // draw, and a window read too early finds nothing. The oracle waits for the window, so a
+    // program that draws slowly is still read.
+    wait_for_window(cx, started.pid)?;
+    Ok(started)
 }
+
+/// Wait until the program's window shows something, or the wait is over.
+///
+/// A program that shows no window at all — a console program, say — is not an error: the caller
+/// reads the tree and finds nothing, which is what the program looks like.
+fn wait_for_window(cx: &OracleCx, pid: u32) -> Result<(), ToolError> {
+    let deadline = std::time::Instant::now() + WINDOW_WAIT;
+    loop {
+        if let Ok(tree) = read_tree(cx, pid) {
+            let shown = tree.get("nodes").and_then(Value::as_array).map(|n| n.len()).unwrap_or(0);
+            // The window itself is one node; anything more means it has drawn.
+            if shown > 1 {
+                return Ok(());
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            return Ok(());
+        }
+        std::thread::sleep(WINDOW_POLL);
+    }
+}
+
+/// How long the oracle waits for a program's window to draw.
+const WINDOW_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// How often the oracle looks while it waits.
+const WINDOW_POLL: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// One observation of a window.
 fn observation(tree: &Value) -> Observation {
@@ -241,7 +273,7 @@ fn walkthrough(cx: &OracleCx, pid: u32, title: &str) -> bool {
 }
 
 /// Read a running program's window.
-fn read_tree(cx: &OracleCx, pid: u32) -> Result<Value, ToolError> {
+pub fn read_tree(cx: &OracleCx, pid: u32) -> Result<Value, ToolError> {
     let out = (cx.call)("runtime_ui_read", json!({"pid": pid, "max_nodes": 1000}))?;
     let result = out.to_json().get("result").cloned().unwrap_or(Value::Null);
     // A program with no window yet: the tree is empty, which the comparison reads as unreadable.
@@ -376,8 +408,30 @@ pub fn groups_of(tree: &Value) -> Vec<Vec<Value>> {
         let (fields, buttons): (Vec<Value>, Vec<Value>) = group.iter().cloned().partition(|a| a.get("action").and_then(Value::as_str) == Some("fill"));
         *group = fields.into_iter().chain(buttons).collect();
     });
-    groups
+    // The groups are bounded, and the session as a whole: a group that would take it past the
+    // budget is left out, and the groups before it are kept.
+    let mut kept: Vec<Vec<Value>> = Vec::new();
+    let mut count = 0;
+    for group in groups.into_iter().take(MAX_GROUPS) {
+        if count + group.len() > MAX_SESSION_ACTIONS {
+            break;
+        }
+        count += group.len();
+        kept.push(group);
+    }
+    kept
 }
+
+/// Most groups a native session is split into.
+///
+/// The native path opens no browser session, so a group costs little; the bound is here so a
+/// window with a great many panels does not make the study endless.
+pub const MAX_GROUPS: usize = 16;
+
+/// Most actions one native session may have.
+///
+/// A session is replayed against the build, so every action runs twice.
+pub const MAX_SESSION_ACTIONS: usize = 60;
 
 /// Whether a control is pressed: a button, a link, a checkbox, a radio, a tab.
 pub fn is_pressed(role: &str) -> bool {

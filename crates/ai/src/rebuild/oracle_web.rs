@@ -221,12 +221,17 @@ pub struct Control {
     ///
     /// Choosing it again is not a change: the page is already in that state.
     pub selected: Option<String>,
+    /// What the control holds.
+    ///
+    /// A choice that rewrites a field's value shows here and nowhere else: the markup keeps
+    /// the attribute a field was written with, not the one it holds now.
+    pub holds: Option<String>,
 }
 
 impl Control {
     /// A control with a role and a name, found by its role and name.
     pub fn of(role: &str, name: &str, step_id: &str) -> Control {
-        Control { role: role.into(), name: name.into(), step_id: step_id.into(), selector: None, option: None, offers: Vec::new(), selected: None }
+        Control { role: role.into(), name: name.into(), step_id: step_id.into(), selector: None, option: None, offers: Vec::new(), selected: None, holds: None }
     }
 
     /// Whether the control takes text: a field, a box or a combo.
@@ -269,6 +274,16 @@ impl Control {
         let mut action = json!({"kind": "select", "value": value, "step_id": self.step_id});
         self.locate(&mut action);
         Some(action)
+    }
+
+    /// The action that reads this control's value, leaving it as it is.
+    ///
+    /// A field another control rewrites is read, not filled: the choice decides what it holds,
+    /// so typing into it would not be the same behaviour.
+    pub fn read_action(&self) -> Value {
+        let mut action = json!({"kind": "read", "step_id": self.step_id});
+        self.locate(&mut action);
+        action
     }
 
     /// The action that fills this control with the probe text.
@@ -375,7 +390,9 @@ pub fn controls_of_page(result: &Value, dom: &Value) -> Vec<Control> {
         let option = element.as_ref().and_then(|e| e.option.clone());
         let offers = element.as_ref().map(|e| e.offers.clone()).unwrap_or_default();
         let selected = element.and_then(|e| e.selected);
-        out.push(Control { role: role.to_string(), name: name.to_string(), step_id, selector, option, offers, selected });
+        // What the control holds, from the accessibility tree.
+        let holds = node.get("value").and_then(Value::as_str).map(str::to_string);
+        out.push(Control { role: role.to_string(), name: name.to_string(), step_id, selector, option, offers, selected, holds });
     }
     // A choice with no markup is given one of the options the tree names. Only a choice that
     // has no value of its own is given one: a choice the markup was read for already knows its
@@ -651,7 +668,7 @@ pub fn groups_of(
         // is tried in turn and the one that changed something is kept. Choosing the first
         // option every time would pick the page's default every time, and a dependency would
         // never show: a country's first option is the one that is already chosen.
-        let mut best: Option<(Value, Vec<Control>, Vec<Control>)> = None;
+        let mut best: Option<(Value, Vec<Control>, Vec<Control>, Vec<Control>)> = None;
         for value in control.choices() {
             let action = control.choose_action(&value);
             let Ok(shown) = read_after(call, url, &action) else { continue };
@@ -667,19 +684,29 @@ pub fn groups_of(
                 .filter(|c| controls.iter().find(|k| k.role == c.role && k.name == c.name).is_some_and(|before| before.offers != c.offers))
                 .cloned()
                 .collect();
-            if appeared.is_empty() && changed.is_empty() {
+            // A control whose *value* changed: a choice that rewrites a field. The control that
+            // was acted on is left out — it changed because it was acted on, not because it
+            // depends on anything.
+            let rewritten: Vec<Control> = revealed
+                .iter()
+                .filter(|c| c.role == "textbox")
+                .filter(|c| c.name != control.name)
+                .filter(|c| controls.iter().find(|k| k.role == c.role && k.name == c.name).is_some_and(|before| before.holds != c.holds))
+                .cloned()
+                .collect();
+            if appeared.is_empty() && changed.is_empty() && rewritten.is_empty() {
                 continue;
             }
             // The option that changed the most is kept. A page's default may hide what it
             // shows until the choice is made, and another option may show less, so the one
             // that revealed the most is the one the page is understood by.
-            let more = appeared.len() + changed.len();
-            let best_more = best.as_ref().map(|(_, ap, ch)| ap.len() + ch.len()).unwrap_or(0);
+            let more = appeared.len() + changed.len() + rewritten.len();
+            let best_more = best.as_ref().map(|(_, ap, ch, rw)| ap.len() + ch.len() + rw.len()).unwrap_or(0);
             if more >= best_more {
-                best = Some((action, appeared, changed));
+                best = Some((action, appeared, changed, rewritten));
             }
         }
-        let Some((action, appeared, changed)) = best else { continue };
+        let Some((action, appeared, changed, rewritten)) = best else { continue };
         // The group is the control that revealed them, then what it revealed.
         let mut group = vec![action];
         for field in appeared.iter().filter(|c| c.takes_text()) {
@@ -692,6 +719,11 @@ pub fn groups_of(
             if let Some(action) = choice.choose_offered_action() {
                 group.push(action);
             }
+        }
+        // A field the choice rewrote is read, not filled: the choice decides what it holds, so
+        // typing into it would not be the same behaviour.
+        for field in rewritten.iter() {
+            group.push(field.read_action());
         }
         groups.push(group);
         if groups.len() >= MAX_GROUPS {

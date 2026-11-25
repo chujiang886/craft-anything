@@ -256,3 +256,77 @@ fn a_choice_that_changes_what_another_offers_brings_it_into_the_session() {
     let region_value = selects[1]["value"].as_str().unwrap_or_default();
     assert!(region_value.starts_with("de-"), "the region is one Germany offers: {region_value}");
 }
+
+/// A page whose plan choice rewrites the name field's value.
+///
+/// Nothing appears and no choice offers anything new — only a field's *value* changes. A
+/// method that looks for controls that appeared, or for options that changed, finds nothing
+/// here.
+const REWRITES: &str = r#"<!doctype html><html><head><script>
+function sync() {
+  document.getElementById('name').value = 'user-' + document.getElementById('plan').value;
+}
+</script></head><body>
+<h1>Sign up</h1>
+<label for="plan">Plan</label>
+<select id="plan" onchange="sync()">
+  <option value="free">Free</option>
+  <option value="pro">Pro</option>
+</select>
+<label for="name">Name</label>
+<input id="name" type="text" value="">
+<label for="email">Email</label>
+<input id="email" type="text" value="">
+</body></html>"#;
+
+/// A choice that rewrites a field's value brings that field into the session.
+///
+/// The dependency is invisible to a method that looks for controls that appeared, and to one
+/// that looks for options that changed: the field was there all along, offering the same
+/// options. It shows only in what the field holds.
+#[ignore = "needs a browser and a served page"]
+#[test]
+fn a_choice_that_rewrites_a_fields_value_brings_it_into_the_session() {
+    let d = tempfile::tempdir().unwrap();
+    let original = d.path().join("original");
+    std::fs::create_dir_all(&original).unwrap();
+    std::fs::write(original.join("index.html"), REWRITES).unwrap();
+    let server = craft_anything_platform::serve::serve_dir(&original).expect("serve the original");
+    let url = server.url();
+
+    let mut session = craft_anything_engine::testing::session();
+    session.settings.deep_mode = true;
+    let engine = craft_anything_engine::Engine::new(session);
+    let call = |tool: &str, params: serde_json::Value| {
+        engine.call(
+            tool,
+            params,
+            craft_anything_engine::CallOptions::new(craft_anything_engine::Caller::Agent).with_consent(craft_anything_engine::Consent::Granted),
+        )
+    };
+
+    let opened = call(
+        "web_walkthrough_record",
+        serde_json::json!({
+            "actions": [{"kind": "goto", "url": url}],
+            "capture": {"at_end": ["accessibility", "dom"]},
+            "headless": true,
+            "timeout_secs": 60,
+        }),
+    )
+    .expect("open the page");
+    let first = opened.to_json().get("result").cloned().unwrap_or(serde_json::Value::Null);
+    let dom = first.pointer("/final_artifacts/dom").cloned().unwrap_or(serde_json::Value::Null);
+    let controls = super::oracle_web::controls_of_page(&first, &dom);
+
+    let groups = super::oracle_web::groups_of(&controls, &call, &url).expect("group the session");
+    let all: Vec<String> = groups.iter().flatten().filter_map(|a| a.get("kind")).filter_map(|k| k.as_str()).map(str::to_string).collect();
+
+    // The choice is made and the field it rewrote is read.
+    assert!(all.iter().any(|a| a == "select"), "the choice is made: {all:?}");
+    assert!(all.iter().any(|a| a == "read"), "the field it rewrote is read: {all:?}");
+    // And the read comes after the choice: before it, the field holds nothing.
+    let select_at = all.iter().position(|a| a == "select").expect("a select");
+    let read_at = all.iter().position(|a| a == "read").expect("a read");
+    assert!(select_at < read_at, "the choice is made before the field is read: {all:?}");
+}

@@ -234,9 +234,22 @@ Two things make this work:
 A page with two choices of the same kind gives each its own selector by pairing the tree's
 controls with the markup's elements **in order**, the order both list them in.
 
-What this still does not find: a dependency between two controls whose effect is not in what they
-offer and not in what appears — a choice that changes a field's *value*, say. The groups are
-found by acting on each control once, not by searching over paths.
+A choice can also change what a *field holds*. That is found too: a control whose value changed
+is brought into the group of the control that changed it, and it is **read** rather than filled,
+because the choice decides what it holds and typing into it would not be the same behaviour.
+
+Two things make this safe:
+
+- **The control that was acted on is left out.** Its value changed because it was acted on, not
+  because it depends on anything. Without that rule every probe looks like a dependency.
+- **A password field's value is never read.** Chrome reports a password field as an ordinary text
+  box, with no mark in the tree to tell it apart, and reports its value as one bullet per
+  character — which is the password's length. A read of a password field is refused outright, by
+  the element's own `type`.
+
+What this still does not find: a dependency between two controls whose effect is in none of
+these — a choice that changes something the accessibility tree does not report, say. The groups
+are found by acting on each control once, not by searching over paths.
 
 #### The session is bounded
 
