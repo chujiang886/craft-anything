@@ -8,6 +8,9 @@ use craft_anything_engine::oracle::{BehaviorOracle, OracleCx, Script};
 use craft_anything_engine::workspace::TargetRef;
 
 use super::oracle_console::ConsoleOracle;
+use super::oracle_game::GameOracle;
+use super::oracle_native::NativeOracle;
+use super::oracle_web::WebOracle;
 
 /// The oracles this build knows, in the order they are tried.
 pub struct Oracles {
@@ -27,7 +30,7 @@ impl Oracles {
     /// comes before a more general one. A game's numbers are its own, not the output of running
     /// it, so the game oracle is tried before the console one.
     pub fn built_in() -> Self {
-        let oracles: Vec<Box<dyn BehaviorOracle>> = vec![Box::new(ConsoleOracle)];
+        let oracles: Vec<Box<dyn BehaviorOracle>> = vec![Box::new(WebOracle), Box::new(GameOracle), Box::new(NativeOracle), Box::new(ConsoleOracle)];
         Oracles { oracles }
     }
 
@@ -92,7 +95,14 @@ mod tests {
 
     #[test]
     fn the_built_in_oracles_are_named() {
-        assert_eq!(Oracles::built_in().ids(), ["console"]);
+        assert_eq!(Oracles::built_in().ids(), ["web", "game-mechanics", "native", "console"]);
+    }
+
+    #[test]
+    fn a_website_is_judged_by_the_web_oracle() {
+        let oracles = Oracles::built_in();
+        let target = TargetRef::Website { url: "https://example.com".into() };
+        assert_eq!(oracles.for_target(&target).map(|o| o.id()), Some("web"));
     }
 
     #[test]
@@ -219,6 +229,9 @@ mod capabilities {
         let oracles = Oracles::built_in();
         let needs = |id: &str| oracles.by_id(id).map(|o| o.needs().capabilities().to_vec());
         assert_eq!(needs("console"), Some(vec![Capability::Program]));
+        assert_eq!(needs("web"), Some(vec![Capability::Page]));
+        assert_eq!(needs("game-mechanics"), Some(vec![Capability::Report]));
+        assert_eq!(needs("native"), Some(vec![Capability::App]));
     }
 
     /// A context with only a program does not satisfy an oracle that needs a page.
@@ -254,8 +267,8 @@ mod capabilities {
         let cx = context(&call, &target);
         let oracles = Oracles::built_in();
         assert!(!oracles.can_judge(&cx), "a website is not judged by the console oracle");
-        let err = oracles.judge(&cx, &crate::rebuild::oracle_console::script(vec![], vec![])).expect_err("it is refused");
-        assert!(err.message.contains("target"), "{}", err.message);
+        let err = oracles.judge(&cx, &crate::rebuild::oracle_web::script(vec![], vec![])).expect_err("it is refused");
+        assert!(err.message.contains("web"), "{}", err.message);
     }
 
     /// A report is a capability like any other.
